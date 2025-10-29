@@ -344,7 +344,10 @@ import { mgnregaService } from '@/services/mgnrega';
 import { DISTRICTS } from '@/data/districts';
 
 const connectDB = async () => {
-  if (mongoose.connections[0].readyState) return;
+  if (mongoose.connections[0].readyState) {
+    console.log('✅ MongoDB already connected');
+    return;
+  }
   
   try {
     await mongoose.connect(process.env.MONGODB_URI || '');
@@ -357,6 +360,11 @@ const connectDB = async () => {
 
 // Track ongoing API requests to prevent duplicate calls
 const ongoingRequests = new Map<string, Promise<any>>();
+
+// ✅ HELPER: Normalize district/state names for consistent matching
+function normalizeDistrictName(name: string): string {
+  return name.trim().toUpperCase();
+}
 
 export async function GET(
   request: Request,
@@ -381,36 +389,53 @@ export async function GET(
 
     console.log(`✅ Found in config: ${districtInfo.name}, ${districtInfo.state}`);
 
-    // 2. Try MongoDB cache (check without expiry filter)
+    // 2. Try MongoDB cache with NORMALIZED names
+    const normalizedDistrictName = normalizeDistrictName(districtInfo.name);
+    const normalizedStateName = normalizeDistrictName(districtInfo.state);
+
     const mongoQuery = {
-      district_name: districtInfo.name,
-      state_name: districtInfo.state,
+      district_name: normalizedDistrictName,
+      state_name: normalizedStateName,
     };
 
-    const mongoData = await DistrictPerformance.findOne(mongoQuery).sort({ created_at: -1 });
+    console.log(`🔍 Searching MongoDB with query:`, mongoQuery);
+
+    const mongoData = await DistrictPerformance.findOne(mongoQuery).sort({ created_at: -1 }).lean();
     
     if (mongoData) {
-      const cacheAge = Math.floor((Date.now() - mongoData.created_at.getTime()) / 1000);
-      const isExpired = mongoData.expires_at < new Date();
+      //@ts-ignore
+      const cacheAge = Math.floor((Date.now() - new Date(mongoData.created_at).getTime()) / 1000);
+      //@ts-ignore
+      const isExpired = new Date(mongoData.expires_at) < new Date();
       
-      console.log(`💾 Found MongoDB cache (Age: ${cacheAge}s, Expired: ${isExpired})`);
+      console.log(`💾 Found MongoDB cache!`);
+      console.log(`   Age: ${cacheAge}s`);
+      console.log(`   Expired: ${isExpired}`);
+      //@ts-ignore
+      console.log(`   Created: ${mongoData.created_at}`);
+      //@ts-ignore
+      console.log(`   Expires: ${mongoData.expires_at}`);
       
-      // ✅ SERVE CACHE IMMEDIATELY (Fast UX)
+      // ✅ SERVE CACHE IMMEDIATELY
       const responseData = {
         success: true,
+        //@ts-ignore
         district_code: mongoData.district_code,
+        //@ts-ignore
         district_name: mongoData.district_name,
+        //@ts-ignore
         state_name: mongoData.state_name,
+        //@ts-ignore
         meta: mongoData.meta,
+        //@ts-ignore
         performance_data: mongoData.performance_data,
+        //@ts-ignore
         statistics: mongoData.statistics,
       };
 
       // ✅ IF CACHE IS OLD (> 30 min), REFRESH IN BACKGROUND
-      if (cacheAge > 1800) { // 30 minutes
-        console.log(`🔄 Cache is old (${cacheAge}s), triggering background refresh...`);
-        
-        // Don't await - let it run in background
+      if (cacheAge > 1800) {
+        console.log(`🔄 Cache is old, triggering background refresh...`);
         refreshCacheInBackground(districtInfo).catch(err => {
           console.error('⚠️  Background refresh failed:', err.message);
         });
@@ -425,8 +450,10 @@ export async function GET(
       });
     }
 
-    // 3. NO CACHE - Fetch from API (slow - 2-5 seconds)
-    console.log(`🌐 No cache found - Fetching from API...`);
+    console.log(`❌ No MongoDB cache found`);
+
+    // 3. NO CACHE - Fetch from API
+    console.log(`🌐 Fetching from API...`);
     const responseData = await fetchAndCacheData(districtInfo);
 
     console.log(`${'='.repeat(60)}\n`);
@@ -449,7 +476,7 @@ export async function GET(
   }
 }
 
-// ✅ HELPER: Fetch and cache data (reusable)
+// ✅ HELPER: Fetch and cache data
 async function fetchAndCacheData(
   districtInfo: { name: string; state: string }
 ) {
@@ -464,6 +491,8 @@ async function fetchAndCacheData(
   // Start new request
   const requestPromise = (async () => {
     try {
+      console.log(`🌐 Calling MGNREGA API for ${districtInfo.name}, ${districtInfo.state}...`);
+      
       const performanceData = await mgnregaService.getDistrictPerformanceByName(
         districtInfo.name,
         districtInfo.state
@@ -472,13 +501,18 @@ async function fetchAndCacheData(
       console.log(`✅ API Data Retrieved:`);
       console.log(`   District: ${performanceData.district_name}`);
       console.log(`   State: ${performanceData.state_name}`);
+      console.log(`   Code: ${performanceData.district_code}`);
       console.log(`   Year: ${performanceData.fin_year}`);
+
+      // ✅ NORMALIZE names for consistent storage
+      const normalizedDistrictName = normalizeDistrictName(performanceData.district_name);
+      const normalizedStateName = normalizeDistrictName(performanceData.state_name);
 
       const responseData = {
         success: true,
         district_code: performanceData.district_code,
-        district_name: performanceData.district_name,
-        state_name: performanceData.state_name,
+        district_name: normalizedDistrictName,  // ✅ UPPERCASE
+        state_name: normalizedStateName,        // ✅ UPPERCASE
         meta: {
           fin_year: performanceData.fin_year,
           month: performanceData.month,
@@ -530,12 +564,16 @@ async function fetchAndCacheData(
         },
       };
 
-      // ✅ UPSERT to MongoDB (prevents duplicates)
+      // ✅ SAVE TO MONGODB with normalized names
+      console.log(`💾 Attempting to save to MongoDB...`);
+      console.log(`   District: ${normalizedDistrictName}`);
+      console.log(`   State: ${normalizedStateName}`);
+      
       try {
-        await DistrictPerformance.findOneAndUpdate(
+        const result = await DistrictPerformance.findOneAndUpdate(
           { 
-            district_name: districtInfo.name,
-            state_name: districtInfo.state 
+            district_name: normalizedDistrictName,
+            state_name: normalizedStateName
           },
           {
             $set: {
@@ -546,17 +584,26 @@ async function fetchAndCacheData(
           },
           { 
             upsert: true,
-            new: true
+            new: true,
+            runValidators: true
           }
         );
-        console.log(`💾 Upserted to MongoDB (TTL: 1 hour)`);
+        
+        console.log(`✅ MongoDB save successful!`);
+        console.log(`   Document ID: ${result?._id}`);
+        console.log(`   Created at: ${result?.created_at}`);
+        console.log(`   Expires at: ${result?.expires_at}`);
       } catch (dbError) {
-        console.error('⚠️  MongoDB upsert failed:', dbError);
+        console.error('❌ MongoDB save FAILED:', dbError);
+        if (dbError instanceof Error) {
+          console.error('   Error message:', dbError.message);
+          console.error('   Error stack:', dbError.stack);
+        }
+        throw dbError;
       }
 
       return responseData;
     } finally {
-      // Clean up after request completes
       ongoingRequests.delete(requestKey);
     }
   })();
@@ -565,16 +612,16 @@ async function fetchAndCacheData(
   return await requestPromise;
 }
 
-// ✅ HELPER: Background cache refresh (non-blocking)
+// ✅ HELPER: Background cache refresh
 async function refreshCacheInBackground(
   districtInfo: { name: string; state: string }
 ) {
-  console.log(`🔄 Starting background refresh for ${districtInfo.name}...`);
+  console.log(`🔄 Background refresh for ${districtInfo.name}...`);
   
   try {
     await fetchAndCacheData(districtInfo);
-    console.log(`✅ Background refresh completed for ${districtInfo.name}`);
+    console.log(`✅ Background refresh completed`);
   } catch (error) {
-    console.error(`❌ Background refresh failed for ${districtInfo.name}:`, error);
+    console.error(`❌ Background refresh failed:`, error);
   }
 }
