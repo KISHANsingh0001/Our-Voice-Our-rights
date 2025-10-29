@@ -5,36 +5,73 @@ class RedisService {
   private isConnected = false;
 
   constructor() {
-    if (process.env.REDIS_URL) {
-      try {
-        this.client = new Redis(process.env.REDIS_URL, {
-          maxRetriesPerRequest: 3,
-          enableReadyCheck: true,
-          retryStrategy(times) {
-            const delay = Math.min(times * 50, 2000);
-            return delay;
-          },
-        });
+    // Skip Redis initialization during build time
+    if (process.env.NEXT_PHASE === 'phase-production-build') {
+      console.log('⚠️  Build phase detected - Redis initialization skipped');
+      return;
+    }
 
-        this.client.on('connect', () => {
-          console.log('✅ Redis connected');
-          this.isConnected = true;
-        });
-
-        this.client.on('error', (err) => {
-          console.error('❌ Redis error:', err);
-          this.isConnected = false;
-        });
-      } catch (error) {
-        console.error('❌ Redis initialization failed:', error);
-      }
-    } else {
+    // Only initialize Redis if URL is provided
+    if (!process.env.REDIS_URL) {
       console.warn('⚠️  REDIS_URL not set - caching disabled');
+      return;
+    }
+
+    try {
+      this.client = new Redis(process.env.REDIS_URL, {
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: true,
+        connectTimeout: 10000,
+        lazyConnect: true, // Don't connect immediately
+        retryStrategy(times) {
+          if (times > 3) {
+            console.error('❌ Redis connection failed after 3 retries');
+            return null; // Stop retrying
+          }
+          const delay = Math.min(times * 50, 2000);
+          return delay;
+        },
+        tls: {
+          rejectUnauthorized: false, // Required for Redis Cloud
+        },
+      });
+
+      this.client.on('connect', () => {
+        console.log('✅ Redis connected');
+        this.isConnected = true;
+      });
+
+      this.client.on('ready', () => {
+        console.log('✅ Redis ready');
+        this.isConnected = true;
+      });
+
+      this.client.on('error', (err) => {
+        console.error('❌ Redis error:', err.message);
+        this.isConnected = false;
+      });
+
+      this.client.on('close', () => {
+        console.log('⚠️  Redis connection closed');
+        this.isConnected = false;
+      });
+
+      // Only connect in runtime, not during build
+      if (process.env.NODE_ENV !== 'test') {
+        this.client.connect().catch(err => {
+          console.error('❌ Failed to connect to Redis:', err.message);
+        });
+      }
+    } catch (error) {
+      console.error('❌ Redis initialization failed:', error);
+      this.client = null;
     }
   }
 
   async get<T>(key: string): Promise<T | null> {
-    if (!this.client || !this.isConnected) return null;
+    if (!this.client || !this.isConnected) {
+      return null;
+    }
 
     try {
       const data = await this.client.get(key);
@@ -50,7 +87,9 @@ class RedisService {
   }
 
   async set(key: string, value: any, ttlSeconds: number = 300): Promise<boolean> {
-    if (!this.client || !this.isConnected) return false;
+    if (!this.client || !this.isConnected) {
+      return false;
+    }
 
     try {
       await this.client.setex(key, ttlSeconds, JSON.stringify(value));
@@ -63,7 +102,9 @@ class RedisService {
   }
 
   async del(key: string): Promise<boolean> {
-    if (!this.client || !this.isConnected) return false;
+    if (!this.client || !this.isConnected) {
+      return false;
+    }
 
     try {
       await this.client.del(key);
@@ -76,7 +117,9 @@ class RedisService {
   }
 
   async clear(pattern: string = '*'): Promise<number> {
-    if (!this.client || !this.isConnected) return 0;
+    if (!this.client || !this.isConnected) {
+      return 0;
+    }
 
     try {
       const keys = await this.client.keys(pattern);
@@ -93,6 +136,13 @@ class RedisService {
 
   isReady(): boolean {
     return this.isConnected;
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.client) {
+      await this.client.quit();
+      console.log('👋 Redis disconnected');
+    }
   }
 }
 
