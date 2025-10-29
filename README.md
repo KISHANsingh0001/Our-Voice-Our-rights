@@ -12,7 +12,7 @@
 
 **Empowering rural communities with transparent access to MGNREGA data**
 
-[🚀 Live Demo](#) • [📖 Documentation](#documentation) • [🐛 Report Bug](#) • [✨ Request Feature](#)
+[🚀 Live Demo](https://our-voice-our-rights-indol.vercel.app/) • [📖 Documentation](#documentation) • [🐛 Report Bug](#) • [✨ Request Feature](#)
 
 </div>
 
