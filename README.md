@@ -45,11 +45,12 @@ Selector
 
 ---
 
+https://github.com/user-attachments/assets/2530595e-f9a1-4678-9719-21977be101dd
 ## 🎥 Demo Video
 
 <div align="center">
 
-[![Demo Video](./docs/screenshots/video-thumbnail.png)](https://your-video-link.com)
+
 
 **Click to watch full demo** *(3 minutes)*
 
